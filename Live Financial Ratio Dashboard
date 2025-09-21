@@ -1,0 +1,121 @@
+pip install yfinance gradio pandas --upgrade
+# pip install yfinance gradio pandas --upgrade
+import gradio as gr
+import yfinance as yf
+import pandas as pd
+import traceback
+
+def _find_row_value(df: pd.DataFrame, keywords):
+    if df is None or df.empty:
+        return None, None
+    for name in df.index:
+        lname = str(name).lower()
+        for kw in keywords:
+            if kw in lname:
+                series = df.loc[name]
+                try:
+                    s = series.dropna()
+                    if not s.empty:
+                        return float(s.iloc[0]), name
+                    val = series.iloc[0]
+                    return float(val) if pd.notnull(val) else None, name
+                except Exception:
+                    return None, name
+    return None, None
+
+def get_financial_ratios(ticker_symbol: str, debug: bool = False):
+    ticker_symbol = str(ticker_symbol or "").strip()
+    if not ticker_symbol:
+        return "⚠️ Please select or enter a ticker symbol."
+
+    try:
+        t = yf.Ticker(ticker_symbol)
+
+        # Market price
+        market_price = None
+        try:
+            hist = t.history(period="1d", actions=False)
+            if hist is not None and not hist.empty:
+                market_price = float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+        if market_price is None:
+            market_price = t.info.get("regularMarketPrice") or getattr(t, "fast_info", {}).get("last_price")
+
+        # Financials / Balance Sheet
+        fin = t.financials if hasattr(t, "financials") else None
+        bal = t.balance_sheet if hasattr(t, "balance_sheet") else None
+        if (fin is None or fin.empty) and hasattr(t, "quarterly_financials") and not t.quarterly_financials.empty:
+            fin = t.quarterly_financials
+        if (bal is None or bal.empty) and hasattr(t, "quarterly_balance_sheet") and not t.quarterly_balance_sheet.empty:
+            bal = t.quarterly_balance_sheet
+
+        net_income, net_idx = _find_row_value(fin, ["net income"])
+        shareholder_equity, eq_idx = _find_row_value(bal, [
+            "total stockholder equity",
+            "total shareholders' equity",
+            "total shareholder equity",
+            "total equity"
+        ])
+        total_assets, assets_idx = _find_row_value(bal, ["total assets"])
+
+        # EPS
+        eps = t.info.get("trailingEps", None)
+        if (eps is None or eps == 0) and net_income is not None:
+            shares = t.info.get("sharesOutstanding", None)
+            if shares:
+                try:
+                    eps = net_income / shares
+                except Exception:
+                    eps = None
+
+        # Ratios
+        pe_ratio = (market_price / eps) if (market_price is not None and eps not in (None, 0)) else None
+        roe = (net_income / shareholder_equity) * 100 if (net_income and shareholder_equity not in (None, 0)) else None
+        roa = (net_income / total_assets) * 100 if (net_income and total_assets not in (None, 0)) else None
+
+        lines = []
+        lines.append(f"Ticker: {ticker_symbol}")
+        lines.append(f"Market price: {market_price if market_price is not None else 'N/A'}")
+        lines.append(f"EPS: {eps if eps is not None else 'N/A'}")
+        lines.append("")
+        lines.append(f"P/E Ratio: {pe_ratio:.2f}" if pe_ratio is not None else "P/E Ratio: N/A")
+        lines.append(f"ROE: {roe:.2f}%" if roe is not None else "ROE: N/A")
+        lines.append(f"ROA: {roa:.2f}%" if roa is not None else "ROA: N/A")
+
+        if debug:
+            lines.append("\n--- DEBUG ---")
+            lines.append(f"net_income row: {net_idx} -> {net_income}")
+            lines.append(f"equity row: {eq_idx} -> {shareholder_equity}")
+            lines.append(f"assets row: {assets_idx} -> {total_assets}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        return f"⚠️ Error fetching/processing data:\n{e}\n\nTraceback:\n{tb}"
+
+# --- Popular tickers for dropdown ---
+popular_tickers = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META",   # US tech
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"  # India
+]
+
+# --- Gradio UI ---
+with gr.Blocks() as demo:
+    gr.Markdown("## 📊 Live Financial Ratios (P/E, ROE, ROA)\nChoose from dropdown or enter your own ticker.")
+
+    with gr.Row():
+        dropdown = gr.Dropdown(choices=popular_tickers, label="Select Popular Ticker", value="AAPL")
+        textbox = gr.Textbox(label="Or Enter Custom Ticker", placeholder="e.g., RELIANCE.NS, NFLX")
+        dbg = gr.Checkbox(label="Show debug info", value=False)
+
+    out = gr.Textbox(label="Results", lines=14)
+    btn = gr.Button("Get Ratios")
+
+    def combined_input(selected, custom, debug):
+        return get_financial_ratios(custom if custom else selected, debug)
+
+    btn.click(fn=combined_input, inputs=[dropdown, textbox, dbg], outputs=out)
+
+demo.launch()
