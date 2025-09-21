@@ -1,0 +1,116 @@
+pip install numpy pandas matplotlib gradio yfinance
+import matplotlib.pyplot as plt
+import gradio as gr
+import yfinance as yf
+import numpy as np
+
+# --- Manual EPS Calculation ---
+def calculate_eps(net_income, preferred_dividends, shares):
+    net_income = net_income or 0
+    preferred_dividends = preferred_dividends or 0
+    shares = shares or 0
+    if shares == 0:
+        return None
+    return (net_income - preferred_dividends) / shares
+
+def eps_trend(net_incomes, preferred_dividends, shares):
+    net_incomes = [float(x.strip()) for x in net_incomes.split(",") if x.strip()]
+    preferred_dividends = [float(x.strip()) for x in preferred_dividends.split(",") if x.strip()]
+    shares = [float(x.strip()) for x in shares.split(",") if x.strip()]
+
+    max_len = max(len(net_incomes), len(preferred_dividends), len(shares))
+    net_incomes += [0] * (max_len - len(net_incomes))
+    preferred_dividends += [0] * (max_len - len(preferred_dividends))
+    shares += [1] * (max_len - len(shares))
+
+    years = list(range(1, max_len + 1))
+    eps_values = [calculate_eps(ni, pd, sh) for ni, pd, sh in zip(net_incomes, preferred_dividends, shares)]
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(years, eps_values, marker="o", linestyle="-", color="blue")
+    plt.title("EPS Trend Over Years")
+    plt.xlabel("Year")
+    plt.ylabel("EPS")
+    plt.grid(True)
+    plt.tight_layout()
+
+    return plt.gcf()
+
+# --- Yahoo Finance EPS ---
+def yahoo_eps(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        fin = stock.financials  # Quarterly/Annual financials
+        shares = stock.get_shares_full(start="2018-01-01")  # Outstanding shares history
+
+        if fin is None or shares is None:
+            return "⚠️ No data available", None
+
+        net_income = fin.loc["Net Income"]
+        dividends = fin.loc["Preferred Stock And Other Adjustments"] if "Preferred Stock And Other Adjustments" in fin.index else [0] * len(net_income)
+
+        # Convert to yearly EPS
+        years = net_income.index.year
+        eps_values = []
+        for year, ni in zip(years, net_income):
+            sh = shares.iloc[-1] if not shares.empty else 1
+            pd = dividends[0] if isinstance(dividends, (list, np.ndarray)) else 0
+            eps_values.append(calculate_eps(ni, pd, sh))
+
+        # Prediction (simple linear trend for next 3 years)
+        x = np.arange(len(eps_values))
+        coeffs = np.polyfit(x, eps_values, 1)  # Linear regression
+        pred_x = np.arange(len(eps_values), len(eps_values) + 3)
+        pred_y = np.polyval(coeffs, pred_x)
+
+        # Plot EPS
+        plt.figure(figsize=(7, 4))
+        plt.plot(years, eps_values, marker="o", label="Actual EPS", color="blue")
+        plt.plot(range(years[-1] + 1, years[-1] + 4), pred_y, marker="x", linestyle="--", color="red", label="Predicted EPS")
+        plt.title(f"{ticker} - EPS Trend & Forecast")
+        plt.xlabel("Year")
+        plt.ylabel("EPS")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+
+        return f"Latest EPS: {eps_values[-1]:.2f}", plt.gcf()
+
+    except Exception as e:
+        return f"⚠️ Error fetching data: {str(e)}", None
+
+# --- Gradio Interface ---
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("## 📊 EPS Dashboard")
+
+    with gr.Tab("Manual EPS Calculator"):
+        ni = gr.Number(label="Net Income")
+        pd = gr.Number(label="Preferred Dividends")
+        sh = gr.Number(label="Outstanding Shares")
+        eps_output = gr.Textbox(label="Earnings Per Share (EPS)")
+        btn_eps = gr.Button("Calculate EPS")
+        btn_eps.click(
+            fn=lambda ni, pd, sh: (
+                f"Earnings Per Share: {eps:.2f}" if (eps := calculate_eps(ni, pd, sh)) is not None else "⚠️ Invalid input"
+            ),
+            inputs=[ni, pd, sh],
+            outputs=eps_output,
+        )
+
+    with gr.Tab("Manual EPS Trend"):
+        ni_series = gr.Textbox(label="Net Income (comma separated, e.g., 250000,300000,400000)")
+        pd_series = gr.Textbox(label="Preferred Dividends (comma separated)")
+        sh_series = gr.Textbox(label="Shares (comma separated)")
+        chart_output = gr.Plot()
+        btn_chart = gr.Button("Show EPS Trend")
+        btn_chart.click(fn=eps_trend, inputs=[ni_series, pd_series, sh_series], outputs=chart_output)
+
+    with gr.Tab("Yahoo Finance EPS"):
+        ticker_input = gr.Textbox(label="Enter Stock Ticker (e.g., AAPL, TSLA, INFY.NS)")
+        eps_result = gr.Textbox(label="Latest EPS")
+        eps_chart = gr.Plot()
+        btn_yahoo = gr.Button("Fetch EPS from Yahoo Finance")
+        btn_yahoo.click(fn=yahoo_eps, inputs=ticker_input, outputs=[eps_result, eps_chart])
+
+if __name__ == "__main__":
+    demo.launch(share=True)
